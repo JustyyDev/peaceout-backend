@@ -122,7 +122,7 @@ app.post('/api/videos/upload', upload.single('video'), (req, res) => {
   if (!title || !req.file)
     return res.status(400).json({ error: 'Missing video or title' });
   db.run('INSERT INTO videos (userId, title, description, filename) VALUES (?, ?, ?, ?)',
-    [req.session.userId, title, description, req.file.filename],
+    [req.session.userId, title, description || '', req.file.filename],
     function (err) {
       if (err) return res.status(500).json({ error: 'Failed to save video' });
       res.json({ id: this.lastID, title, description, filename: req.file.filename });
@@ -158,6 +158,46 @@ app.get('/api/users/:id/videos', (req, res) => {
     res.json(rows);
   });
 });
+
+// --- Discover/Search API ---
+app.get('/api/discover', (req, res) => {
+  const { q = '', type = 'all' } = req.query;
+  const searchQ = `%${q}%`;
+
+  const results = {};
+  let toSearch = [];
+
+  if (!type || type === 'all') toSearch = ['users', 'videos'];
+  else if (type === 'users') toSearch = ['users'];
+  else if (type === 'videos') toSearch = ['videos'];
+
+  let pending = toSearch.length;
+  if (pending === 0) return res.json({ users: [], videos: [] });
+
+  if (toSearch.includes('users')) {
+    db.all(
+      `SELECT id, username, avatarUrl, bio FROM users WHERE username LIKE ? OR bio LIKE ? LIMIT 10`,
+      [searchQ, searchQ],
+      (err, rows) => {
+        results.users = rows || [];
+        if (--pending === 0) res.json(results);
+      }
+    );
+  }
+  if (toSearch.includes('videos')) {
+    db.all(
+      `SELECT videos.id, videos.title, videos.description, videos.filename, users.username as uploaderUsername, users.avatarUrl as uploaderAvatar
+       FROM videos LEFT JOIN users ON videos.userId = users.id
+       WHERE videos.title LIKE ? OR videos.description LIKE ? OR users.username LIKE ?
+       ORDER BY videos.createdAt DESC LIMIT 10`,
+      [searchQ, searchQ, searchQ],
+      (err, rows) => {
+        results.videos = rows || [];
+        if (--pending === 0) res.json(results);
+      }
+    );
+  }
+}
 
 // Serve uploaded videos statically
 app.use('/uploads', express.static(UPLOAD_DIR));
