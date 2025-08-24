@@ -9,35 +9,40 @@ const fs = require('fs');
 
 const app = express();
 
-app.use(cors({ origin: true, credentials: true }));
+// ====== FIXED SESSION AND CORS CONFIG FOR CROSS-DOMAIN LOGIN ======
+app.use(cors({
+  origin: 'https://justyydev.github.io/PeaceOut/', // <<-- CHANGE to your GitHub Pages domain!
+  credentials: true
+}));
 app.use(express.json());
 app.use(session({
   secret: 'peaceoutSecret',
   resave: false,
   saveUninitialized: true,
-  cookie: { secure: false }
+  cookie: {
+    secure: true,           // IMPORTANT: only send cookie over HTTPS
+    sameSite: 'none'        // CRITICAL: allow cross-site cookies
+    // domain: '.onrender.com' // Optional: use only if necessary
+  }
 }));
 
-// Ensure upload directory exists
+// ====== FILE UPLOAD SETUP ======
 const UPLOAD_DIR = path.join(__dirname, '../../uploads');
 if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
-
-// Multer setup for video uploads
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     cb(null, UPLOAD_DIR);
   },
   filename: function (req, file, cb) {
-    // For safety: username-timestamp.ext
     const user = req.session.userId || 'anon';
     cb(null, user + '-' + Date.now() + path.extname(file.originalname));
   }
 });
 const upload = multer({ storage });
 
-// DB Setup
+// ====== SQLITE DB SETUP ======
 const db = new sqlite3.Database('./peaceout.db');
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users (
@@ -58,7 +63,7 @@ db.serialize(() => {
   )`);
 });
 
-// --- User APIs ---
+// ====== USER APIS ======
 
 // Register
 app.post('/api/register', async (req, res) => {
@@ -113,7 +118,7 @@ app.post('/api/me', (req, res) => {
   });
 });
 
-// --- Video APIs ---
+// ====== VIDEO APIS ======
 
 // Upload video
 app.post('/api/videos/upload', upload.single('video'), (req, res) => {
@@ -159,7 +164,7 @@ app.get('/api/users/:id/videos', (req, res) => {
   });
 });
 
-// --- Discover/Search API ---
+// ====== DISCOVER/SEARCH API ======
 app.get('/api/discover', (req, res) => {
   const { q = '', type = 'all' } = req.query;
   const searchQ = `%${q}%`;
@@ -197,7 +202,7 @@ app.get('/api/discover', (req, res) => {
       }
     );
   }
-}); // <-- THIS closes the /api/discover route!
+});
 
 // Serve uploaded videos statically
 app.use('/uploads', express.static(UPLOAD_DIR));
