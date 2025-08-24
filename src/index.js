@@ -4,11 +4,13 @@ const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcrypt');
 const session = require('express-session');
 const multer = require('multer');
+const multerS3 = require('multer-s3');
+const AWS = require('aws-sdk');
 const path = require('path');
-const fs = require('fs');
 
 const app = express();
 
+app.set('trust proxy', 1); // Trust first proxy (Render)
 // ====== FIXED SESSION AND CORS CONFIG FOR CROSS-DOMAIN LOGIN ======
 app.use(cors({
   origin: ['https://justyydev.github.io', 'http://localhost:3000'],
@@ -26,21 +28,34 @@ app.use(session({
   }
 }));
 
-// ====== FILE UPLOAD SETUP ======
-const UPLOAD_DIR = path.join(__dirname, '../../uploads');
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-}
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, UPLOAD_DIR);
-  },
-  filename: function (req, file, cb) {
-    const user = req.session.userId || 'anon';
-    cb(null, user + '-' + Date.now() + path.extname(file.originalname));
+app.use((req, res, next) => {
+  if (process.env.NODE_ENV === 'production' && req.headers['x-forwarded-proto'] !== 'https') {
+    return res.redirect('https://' + req.headers.host + req.url);
   }
+  next();
 });
-const upload = multer({ storage });
+
+// ====== S3/IDRIVE E2 FILE UPLOAD SETUP ======
+const s3 = new AWS.S3({
+  endpoint: 'https://n5g0.fra.idrivee2-53.com', // Frankfurt region endpoint
+  accessKeyId: '7JqRElzTZT1mosnyzkb7',
+  secretAccessKey: 'NznTq0T39LNMDjyW1zArUxfnBH9Ftb8iYmwo7kAO',
+  region: 'frankfurt',
+  signatureVersion: 'v4',
+  s3ForcePathStyle: true // Required for most S3-compatible services!
+});
+
+const upload = multer({
+  storage: multerS3({
+    s3: s3,
+    bucket: 'peaceout-uploads',
+    acl: 'public-read',
+    key: function (req, file, cb) {
+      const user = req.session.userId || 'anon';
+      cb(null, user + '-' + Date.now() + path.extname(file.originalname));
+    }
+  })
+});
 
 // ====== SQLITE DB SETUP ======
 const db = new sqlite3.Database('./peaceout.db');
@@ -126,11 +141,12 @@ app.post('/api/videos/upload', upload.single('video'), (req, res) => {
   const { title, description } = req.body;
   if (!title || !req.file)
     return res.status(400).json({ error: 'Missing video or title' });
+  // Save the S3 location instead of a filename
   db.run('INSERT INTO videos (userId, title, description, filename) VALUES (?, ?, ?, ?)',
-    [req.session.userId, title, description || '', req.file.filename],
+    [req.session.userId, title, description || '', req.file.location],
     function (err) {
       if (err) return res.status(500).json({ error: 'Failed to save video' });
-      res.json({ id: this.lastID, title, description, filename: req.file.filename });
+      res.json({ id: this.lastID, title, description, filename: req.file.location });
     });
 });
 
@@ -204,8 +220,8 @@ app.get('/api/discover', (req, res) => {
   }
 });
 
-// Serve uploaded videos statically
-app.use('/uploads', express.static(UPLOAD_DIR));
+// --- Remove local uploads static serving: files are on S3 now ---
+// app.use('/uploads', express.static(UPLOAD_DIR));
 
 // --- Server start ---
 const PORT = process.env.PORT || 4000;
