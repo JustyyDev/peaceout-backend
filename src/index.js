@@ -22,7 +22,7 @@ app.use(session({
   cookie: {
     secure: true,           // IMPORTANT: only send cookie over HTTPS
     sameSite: 'none',        // CRITICAL: allow cross-site cookies
-    domain: 'peaceout-backend.onrender.com' // Optional: use only if necessary
+    // domain: 'peaceout-backend.onrender.com' // REMOVE THIS LINE
   }
 }));
 
