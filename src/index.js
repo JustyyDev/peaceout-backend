@@ -11,7 +11,7 @@ const app = express();
 
 // ====== FIXED SESSION AND CORS CONFIG FOR CROSS-DOMAIN LOGIN ======
 app.use(cors({
-  origin: 'https://justyydev.github.io/PeaceOut/', // <<-- CHANGE to your GitHub Pages domain!
+  origin: 'https://justyydev.github.io/', // <<-- CHANGE to your GitHub Pages domain!
   credentials: true
 }));
 app.use(express.json());
