@@ -1,3 +1,7 @@
+require('dotenv').config({ 
+  path: process.env.NODE_ENV === 'production' ? '/etc/secrets/.env' : '.env' 
+});
+
 const express = require('express');
 const cors = require('cors');
 const sqlite3 = require('sqlite3').verbose();
@@ -11,6 +15,7 @@ const path = require('path');
 const app = express();
 
 app.set('trust proxy', 1); // Trust first proxy (Render)
+
 // ====== FIXED SESSION AND CORS CONFIG FOR CROSS-DOMAIN LOGIN ======
 app.use(cors({
   origin: ['https://justyydev.github.io', 'http://localhost:3000'],
@@ -18,12 +23,12 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use(session({
-  secret: 'peaceoutSecret',
+  secret: process.env.SESSION_SECRET || 'peaceoutSecret',
   resave: false,
   saveUninitialized: true,
   cookie: {
     secure: true,           // IMPORTANT: only send cookie over HTTPS
-    sameSite: 'none'       // CRITICAL: allow cross-site cookies
+    sameSite: 'none'        // CRITICAL: allow cross-site cookies
     // domain: 'peaceout-backend.onrender.com' // REMOVE THIS LINE
   }
 }));
@@ -37,10 +42,10 @@ app.use((req, res, next) => {
 
 // ====== S3/IDRIVE E2 FILE UPLOAD SETUP ======
 const s3 = new AWS.S3({
-  endpoint: 'https://n5g0.fra.idrivee2-53.com', // Frankfurt region endpoint
-  accessKeyId: '7JqRElzTZT1mosnyzkb7',
-  secretAccessKey: 'NznTq0T39LNMDjyW1zArUxfnBH9Ftb8iYmwo7kAO',
-  region: 'frankfurt',
+  endpoint: process.env.E2_ENDPOINT, // e.g. 'https://n5g0.fra.idrivee2-53.com'
+  accessKeyId: process.env.E2_KEY,
+  secretAccessKey: process.env.E2_SECRET,
+  region: process.env.E2_REGION,
   signatureVersion: 'v4',
   s3ForcePathStyle: true // Required for most S3-compatible services!
 });
@@ -58,7 +63,7 @@ const upload = multer({
 });
 
 // ====== SQLITE DB SETUP ======
-const db = new sqlite3.Database('./peaceout.db');
+const db = new sqlite3.Database(process.env.DATABASE_PATH || './peaceout.db');
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
