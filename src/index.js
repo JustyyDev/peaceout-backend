@@ -21,7 +21,7 @@ app.use(session({
   saveUninitialized: true,
   cookie: {
     secure: true,           // IMPORTANT: only send cookie over HTTPS
-    sameSite: 'none',        // CRITICAL: allow cross-site cookies
+    sameSite: 'none'       // CRITICAL: allow cross-site cookies
     // domain: 'peaceout-backend.onrender.com' // REMOVE THIS LINE
   }
 }));
