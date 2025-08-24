@@ -7,10 +7,11 @@ const cors = require('cors');
 const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcrypt');
 const session = require('express-session');
-const multer = require('multer');
-const multerS3 = require('multer-s3');
-const AWS = require('aws-sdk');
 const path = require('path');
+
+// --- Use custom upload/transcode middleware instead of plain multerS3 ---
+const { upload, transcodeAndUpload } = require('./transcode-upload');
+const AWS = require('aws-sdk');
 
 const app = express();
 
@@ -29,7 +30,6 @@ app.use(session({
   cookie: {
     secure: true,           // IMPORTANT: only send cookie over HTTPS
     sameSite: 'none'        // CRITICAL: allow cross-site cookies
-    // domain: 'peaceout-backend.onrender.com' // REMOVE THIS LINE
   }
 }));
 
@@ -38,28 +38,6 @@ app.use((req, res, next) => {
     return res.redirect('https://' + req.headers.host + req.url);
   }
   next();
-});
-
-// ====== S3/IDRIVE E2 FILE UPLOAD SETUP ======
-const s3 = new AWS.S3({
-  endpoint: process.env.E2_ENDPOINT, // e.g. 'https://n5g0.fra.idrivee2-53.com'
-  accessKeyId: process.env.E2_KEY,
-  secretAccessKey: process.env.E2_SECRET,
-  region: process.env.E2_REGION,
-  signatureVersion: 'v4',
-  s3ForcePathStyle: true // Required for most S3-compatible services!
-});
-
-const upload = multer({
-  storage: multerS3({
-    s3: s3,
-    bucket: 'peaceout-uploads',
-    acl: 'public-read',
-    key: function (req, file, cb) {
-      const user = req.session.userId || 'anon';
-      cb(null, user + '-' + Date.now() + path.extname(file.originalname));
-    }
-  })
 });
 
 // ====== SQLITE DB SETUP ======
@@ -140,18 +118,18 @@ app.post('/api/me', (req, res) => {
 
 // ====== VIDEO APIS ======
 
-// Upload video
-app.post('/api/videos/upload', upload.single('video'), (req, res) => {
+// Upload video (transcodes to mp4/h264/aac and uploads to S3/e2)
+app.post('/api/videos/upload', upload.single('video'), transcodeAndUpload, (req, res) => {
   if (!req.session.userId) return res.status(401).json({ error: 'Not logged in' });
   const { title, description } = req.body;
-  if (!title || !req.file)
-    return res.status(400).json({ error: 'Missing video or title' });
-  // Save the S3 location instead of a filename
+  if (!title)
+    return res.status(400).json({ error: 'Missing video title' });
+  // Save the S3 location (req.transcodedVideoUrl) instead of filename
   db.run('INSERT INTO videos (userId, title, description, filename) VALUES (?, ?, ?, ?)',
-    [req.session.userId, title, description || '', req.file.location],
+    [req.session.userId, title, description || '', req.transcodedVideoUrl],
     function (err) {
       if (err) return res.status(500).json({ error: 'Failed to save video' });
-      res.json({ id: this.lastID, title, description, filename: req.file.location });
+      res.json({ id: this.lastID, title, description, filename: req.transcodedVideoUrl });
     });
 });
 
@@ -226,7 +204,6 @@ app.get('/api/discover', (req, res) => {
 });
 
 // --- Remove local uploads static serving: files are on S3 now ---
-// app.use('/uploads', express.static(UPLOAD_DIR));
 
 // --- Server start ---
 const PORT = process.env.PORT || 4000;
