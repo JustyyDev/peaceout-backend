@@ -197,7 +197,7 @@ app.get('/api/discover', (req, res) => {
       }
     );
   }
-}
+}); // <-- THIS closes the /api/discover route!
 
 // Serve uploaded videos statically
 app.use('/uploads', express.static(UPLOAD_DIR));
