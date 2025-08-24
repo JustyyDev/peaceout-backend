@@ -50,15 +50,23 @@ db.serialize(() => {
     avatarUrl TEXT,
     bio TEXT
   )`);
+  // Add new columns for likes, dislikes, views if not exist (sqlite can't do ALTER IF NOT EXISTS, so try/catch)
   db.run(`CREATE TABLE IF NOT EXISTS videos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     userId INTEGER,
     title TEXT,
     description TEXT,
     filename TEXT,
+    likes INTEGER DEFAULT 0,
+    dislikes INTEGER DEFAULT 0,
+    views INTEGER DEFAULT 0,
     createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(userId) REFERENCES users(id)
   )`);
+  // Attempt to add columns in case running on old DB (ignore error if already present)
+  db.run('ALTER TABLE videos ADD COLUMN likes INTEGER DEFAULT 0', [], ()=>{});
+  db.run('ALTER TABLE videos ADD COLUMN dislikes INTEGER DEFAULT 0', [], ()=>{});
+  db.run('ALTER TABLE videos ADD COLUMN views INTEGER DEFAULT 0', [], ()=>{});
 });
 
 // ====== USER APIS ======
@@ -163,6 +171,30 @@ app.get('/api/users/:id/videos', (req, res) => {
   });
 });
 
+// Like a video
+app.post('/api/videos/:id/like', (req, res) => {
+  db.run('UPDATE videos SET likes = likes + 1 WHERE id = ?', [req.params.id], function (err) {
+    if (err) return res.status(500).json({ error: 'Like failed' });
+    res.json({ success: true });
+  });
+});
+
+// Dislike a video
+app.post('/api/videos/:id/dislike', (req, res) => {
+  db.run('UPDATE videos SET dislikes = dislikes + 1 WHERE id = ?', [req.params.id], function (err) {
+    if (err) return res.status(500).json({ error: 'Dislike failed' });
+    res.json({ success: true });
+  });
+});
+
+// Increment views (call this when video starts playing)
+app.post('/api/videos/:id/view', (req, res) => {
+  db.run('UPDATE videos SET views = views + 1 WHERE id = ?', [req.params.id], function (err) {
+    if (err) return res.status(500).json({ error: 'View failed' });
+    res.json({ success: true });
+  });
+});
+
 // ====== DISCOVER/SEARCH API ======
 app.get('/api/discover', (req, res) => {
   const { q = '', type = 'all' } = req.query;
@@ -190,7 +222,7 @@ app.get('/api/discover', (req, res) => {
   }
   if (toSearch.includes('videos')) {
     db.all(
-      `SELECT videos.id, videos.title, videos.description, videos.filename, users.username as uploaderUsername, users.avatarUrl as uploaderAvatar
+      `SELECT videos.id, videos.title, videos.description, videos.filename, videos.likes, videos.dislikes, videos.views, users.username as uploaderUsername, users.avatarUrl as uploaderAvatar
        FROM videos LEFT JOIN users ON videos.userId = users.id
        WHERE videos.title LIKE ? OR videos.description LIKE ? OR users.username LIKE ?
        ORDER BY videos.createdAt DESC LIMIT 10`,
@@ -202,8 +234,6 @@ app.get('/api/discover', (req, res) => {
     );
   }
 });
-
-// --- Remove local uploads static serving: files are on S3 now ---
 
 // --- Server start ---
 const PORT = process.env.PORT || 4000;
