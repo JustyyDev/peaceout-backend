@@ -293,9 +293,216 @@ app.post('/api/me', (req, res) => {
   });
 });
 
-// ... (all other APIs unchanged, video/comments/discover, etc.) ... 
+// ====== VIDEO APIS ======
+app.get('/api/videos', (req, res) => {
+  db.all(`
+    SELECT v.*, u.username, u.displayName, u.avatarUrl, 
+           COUNT(DISTINCT vr.id) as totalReactions
+    FROM videos v 
+    LEFT JOIN users u ON v.userId = u.id 
+    LEFT JOIN video_reactions vr ON v.id = vr.videoId
+    GROUP BY v.id
+    ORDER BY v.createdAt DESC 
+    LIMIT 50
+  `, [], (err, videos) => {
+    if (err) return res.status(500).json({ error: 'Database error' });
+    res.json(videos || []);
+  });
+});
 
-// For brevity, keep the rest of your endpoints (videos, comments, discover, etc.) from your current index.js.
+app.get('/api/videos/:id', (req, res) => {
+  const videoId = req.params.id;
+  // Increment view count
+  db.run('UPDATE videos SET views = views + 1 WHERE id = ?', [videoId]);
+  
+  db.get(`
+    SELECT v.*, u.username, u.displayName, u.avatarUrl
+    FROM videos v 
+    LEFT JOIN users u ON v.userId = u.id 
+    WHERE v.id = ?
+  `, [videoId], (err, video) => {
+    if (err) return res.status(500).json({ error: 'Database error' });
+    if (!video) return res.status(404).json({ error: 'Video not found' });
+    res.json(video);
+  });
+});
+
+app.post('/api/videos/upload', upload.single('video'), transcodeAndUpload, (req, res) => {
+  if (!req.session.userId) return res.status(401).json({ error: 'Not logged in' });
+  const { title, description } = req.body;
+  if (!title) return res.status(400).json({ error: 'Title required' });
+  
+  const videoUrl = req.videoUrl || ''; // Set by transcodeAndUpload middleware
+  
+  db.run('INSERT INTO videos (userId, title, description, filename) VALUES (?, ?, ?, ?)',
+    [req.session.userId, title, description, videoUrl],
+    function(err) {
+      if (err) return res.status(500).json({ error: 'Upload failed' });
+      res.json({ id: this.lastID, title, description, filename: videoUrl });
+    });
+});
+
+app.post('/api/videos/:id/reaction', (req, res) => {
+  if (!req.session.userId) return res.status(401).json({ error: 'Not logged in' });
+  const { type } = req.body; // 'like' or 'dislike'
+  const videoId = req.params.id;
+  
+  if (!['like', 'dislike'].includes(type)) {
+    return res.status(400).json({ error: 'Invalid reaction type' });
+  }
+  
+  // Insert or update reaction
+  db.run('INSERT OR REPLACE INTO video_reactions (userId, videoId, type) VALUES (?, ?, ?)',
+    [req.session.userId, videoId, type], function(err) {
+      if (err) return res.status(500).json({ error: 'Database error' });
+      
+      // Update video counts
+      db.run(`UPDATE videos SET 
+        likes = (SELECT COUNT(*) FROM video_reactions WHERE videoId = ? AND type = 'like'),
+        dislikes = (SELECT COUNT(*) FROM video_reactions WHERE videoId = ? AND type = 'dislike')
+        WHERE id = ?`, [videoId, videoId, videoId]);
+      
+      res.json({ success: true });
+    });
+});
+
+// ====== COMMENTS API ======
+app.get('/api/videos/:id/comments', (req, res) => {
+  const videoId = req.params.id;
+  db.all(`
+    SELECT c.*, u.username, u.displayName, u.avatarUrl
+    FROM comments c 
+    LEFT JOIN users u ON c.userId = u.id 
+    WHERE c.videoId = ? 
+    ORDER BY c.createdAt DESC
+  `, [videoId], (err, comments) => {
+    if (err) return res.status(500).json({ error: 'Database error' });
+    res.json(comments || []);
+  });
+});
+
+app.post('/api/videos/:id/comments', (req, res) => {
+  if (!req.session.userId) return res.status(401).json({ error: 'Not logged in' });
+  const { text } = req.body;
+  const videoId = req.params.id;
+  
+  if (!text || !text.trim()) return res.status(400).json({ error: 'Comment text required' });
+  
+  db.run('INSERT INTO comments (videoId, userId, text) VALUES (?, ?, ?)',
+    [videoId, req.session.userId, text.trim()], function(err) {
+      if (err) return res.status(500).json({ error: 'Database error' });
+      res.json({ id: this.lastID, text: text.trim(), createdAt: new Date().toISOString() });
+    });
+});
+
+// ====== DISCOVER/SEARCH API ======
+app.get('/api/discover', (req, res) => {
+  const { q, type = 'all' } = req.query;
+  if (!q || !q.trim()) return res.json({ users: [], videos: [] });
+  
+  const searchTerm = `%${q.trim()}%`;
+  const results = { users: [], videos: [] };
+  
+  const queries = [];
+  
+  if (type === 'all' || type === 'users') {
+    queries.push(new Promise((resolve) => {
+      db.all(`
+        SELECT id, username, displayName, avatarUrl, bio, theme
+        FROM users 
+        WHERE username LIKE ? OR displayName LIKE ? OR bio LIKE ?
+        LIMIT 20
+      `, [searchTerm, searchTerm, searchTerm], (err, users) => {
+        results.users = err ? [] : users;
+        resolve();
+      });
+    }));
+  }
+  
+  if (type === 'all' || type === 'videos') {
+    queries.push(new Promise((resolve) => {
+      db.all(`
+        SELECT v.*, u.username as uploaderUsername, u.displayName as uploaderDisplayName
+        FROM videos v 
+        LEFT JOIN users u ON v.userId = u.id
+        WHERE v.title LIKE ? OR v.description LIKE ?
+        ORDER BY v.createdAt DESC
+        LIMIT 20
+      `, [searchTerm, searchTerm], (err, videos) => {
+        results.videos = err ? [] : videos;
+        resolve();
+      });
+    }));
+  }
+  
+  Promise.all(queries).then(() => {
+    res.json(results);
+  });
+});
+
+// ====== USER PROFILE API ======
+app.get('/api/users/:username', (req, res) => {
+  const username = req.params.username;
+  db.get(`
+    SELECT id, username, displayName, avatarUrl, bio, theme, 
+           (SELECT COUNT(*) FROM videos WHERE userId = users.id) as videoCount
+    FROM users 
+    WHERE username = ?
+  `, [username], (err, user) => {
+    if (err) return res.status(500).json({ error: 'Database error' });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    
+    // Get user's videos
+    db.all(`
+      SELECT v.*, 
+             (SELECT COUNT(*) FROM video_reactions WHERE videoId = v.id AND type = 'like') as likes,
+             (SELECT COUNT(*) FROM video_reactions WHERE videoId = v.id AND type = 'dislike') as dislikes
+      FROM videos v 
+      WHERE v.userId = ? 
+      ORDER BY v.createdAt DESC
+    `, [user.id], (err, videos) => {
+      user.videos = err ? [] : videos;
+      res.json(user);
+    });
+  });
+});
+
+// ====== FOLLOW/UNFOLLOW API ======
+app.get('/api/follow/:userId', (req, res) => {
+  if (!req.session.userId) return res.status(401).json({ error: 'Not logged in' });
+  const targetUserId = req.params.userId;
+  
+  db.get('SELECT * FROM follows WHERE followerId = ? AND followedId = ?',
+    [req.session.userId, targetUserId], (err, follow) => {
+      res.json({ isFollowing: !!follow });
+    });
+});
+
+app.post('/api/follow/:userId', (req, res) => {
+  if (!req.session.userId) return res.status(401).json({ error: 'Not logged in' });
+  const targetUserId = req.params.userId;
+  
+  if (req.session.userId == targetUserId) {
+    return res.status(400).json({ error: 'Cannot follow yourself' });
+  }
+  
+  db.run('INSERT OR IGNORE INTO follows (followerId, followedId) VALUES (?, ?)',
+    [req.session.userId, targetUserId], function(err) {
+      if (err) return res.status(500).json({ error: 'Database error' });
+      res.json({ success: true, isFollowing: true });
+    });
+});
+
+app.delete('/api/follow/:userId', (req, res) => {
+  if (!req.session.userId) return res.status(401).json({ error: 'Not logged in' });
+  const targetUserId = req.params.userId;
+  
+  db.run('DELETE FROM follows WHERE followerId = ? AND followedId = ?',
+    [req.session.userId, targetUserId], function(err) {
+      if (err) return res.status(500).json({ error: 'Database error' });
+      res.json({ success: true, isFollowing: false });
+    });
+});
 
 // --- Server start (important: use server.listen, not app.listen) ---
 const PORT = process.env.PORT || 4000;
