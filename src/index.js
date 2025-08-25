@@ -1,5 +1,5 @@
-require('dotenv').config({ 
-  path: process.env.NODE_ENV === 'production' ? '/etc/secrets/.env' : '.env' 
+require('dotenv').config({
+  path: process.env.NODE_ENV === 'production' ? '/etc/secrets/.env' : '.env'
 });
 
 const express = require('express');
@@ -11,11 +11,10 @@ const path = require('path');
 
 // --- Use custom upload/transcode middleware instead of plain multerS3 ---
 const { upload, transcodeAndUpload } = require('./transcode-upload');
-const AWS = require('aws-sdk');
 
 const app = express();
 
-app.set('trust proxy', 1); // Trust first proxy (Render)
+app.set('trust proxy', 1);
 
 // ====== FIXED SESSION AND CORS CONFIG FOR CROSS-DOMAIN LOGIN ======
 app.use(cors({
@@ -28,8 +27,8 @@ app.use(session({
   resave: false,
   saveUninitialized: true,
   cookie: {
-    secure: true,           // IMPORTANT: only send cookie over HTTPS
-    sameSite: 'none'        // CRITICAL: allow cross-site cookies
+    secure: true,
+    sameSite: 'none'
   }
 }));
 
@@ -50,7 +49,6 @@ db.serialize(() => {
     avatarUrl TEXT,
     bio TEXT
   )`);
-  // Add new columns for likes, dislikes, views if not exist (sqlite can't do ALTER IF NOT EXISTS, so try/catch)
   db.run(`CREATE TABLE IF NOT EXISTS videos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     userId INTEGER,
@@ -63,15 +61,23 @@ db.serialize(() => {
     createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(userId) REFERENCES users(id)
   )`);
-  // Attempt to add columns in case running on old DB (ignore error if already present)
-  db.run('ALTER TABLE videos ADD COLUMN likes INTEGER DEFAULT 0', [], ()=>{});
-  db.run('ALTER TABLE videos ADD COLUMN dislikes INTEGER DEFAULT 0', [], ()=>{});
-  db.run('ALTER TABLE videos ADD COLUMN views INTEGER DEFAULT 0', [], ()=>{});
+  // Reaction table: one row per user/video, type is 'like' or 'dislike'
+  db.run(`CREATE TABLE IF NOT EXISTS video_reactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    userId INTEGER,
+    videoId INTEGER,
+    type TEXT, -- 'like' or 'dislike'
+    UNIQUE(userId, videoId),
+    FOREIGN KEY(userId) REFERENCES users(id),
+    FOREIGN KEY(videoId) REFERENCES videos(id)
+  )`);
+  db.run('ALTER TABLE videos ADD COLUMN likes INTEGER DEFAULT 0', [], () => {});
+  db.run('ALTER TABLE videos ADD COLUMN dislikes INTEGER DEFAULT 0', [], () => {});
+  db.run('ALTER TABLE videos ADD COLUMN views INTEGER DEFAULT 0', [], () => {});
 });
 
 // ====== USER APIS ======
 
-// Register
 app.post('/api/register', async (req, res) => {
   const { username, password, passwordRepeat } = req.body;
   if (!username || !password || !passwordRepeat)
@@ -88,7 +94,6 @@ app.post('/api/register', async (req, res) => {
     });
 });
 
-// Login
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
   db.get('SELECT * FROM users WHERE username = ?', [username], async (err, user) => {
@@ -100,12 +105,10 @@ app.post('/api/login', (req, res) => {
   });
 });
 
-// Logout
 app.post('/api/logout', (req, res) => {
   req.session.destroy(() => res.json({ success: true }));
 });
 
-// Get current user
 app.get('/api/me', (req, res) => {
   if (!req.session.userId) return res.status(401).json({ error: 'Not logged in' });
   db.get('SELECT id, username, avatarUrl, bio FROM users WHERE id = ?', [req.session.userId], (err, user) => {
@@ -114,7 +117,6 @@ app.get('/api/me', (req, res) => {
   });
 });
 
-// Update profile (avatar, bio)
 app.post('/api/me', (req, res) => {
   const { avatarUrl, bio } = req.body;
   if (!req.session.userId) return res.status(401).json({ error: 'Not logged in' });
@@ -126,13 +128,11 @@ app.post('/api/me', (req, res) => {
 
 // ====== VIDEO APIS ======
 
-// Upload video (transcodes to mp4/h264/aac and uploads to S3/e2)
 app.post('/api/videos/upload', upload.single('video'), transcodeAndUpload, (req, res) => {
   if (!req.session.userId) return res.status(401).json({ error: 'Not logged in' });
   const { title, description } = req.body;
   if (!title)
     return res.status(400).json({ error: 'Missing video title' });
-  // Save the S3 location (req.transcodedVideoUrl) instead of filename
   db.run('INSERT INTO videos (userId, title, description, filename) VALUES (?, ?, ?, ?)',
     [req.session.userId, title, description || '', req.transcodedVideoUrl],
     function (err) {
@@ -141,7 +141,6 @@ app.post('/api/videos/upload', upload.single('video'), transcodeAndUpload, (req,
     });
 });
 
-// List all videos
 app.get('/api/videos', (req, res) => {
   db.all(`SELECT videos.*, users.username, users.avatarUrl
           FROM videos
@@ -152,7 +151,6 @@ app.get('/api/videos', (req, res) => {
   });
 });
 
-// Get single video info
 app.get('/api/videos/:id', (req, res) => {
   db.get(`SELECT videos.*, users.username, users.avatarUrl
           FROM videos
@@ -163,7 +161,6 @@ app.get('/api/videos/:id', (req, res) => {
   });
 });
 
-// List videos by user
 app.get('/api/users/:id/videos', (req, res) => {
   db.all(`SELECT * FROM videos WHERE userId = ? ORDER BY createdAt DESC`, [req.params.id], (err, rows) => {
     if (err) return res.status(500).json({ error: 'Failed to fetch videos' });
@@ -171,19 +168,83 @@ app.get('/api/users/:id/videos', (req, res) => {
   });
 });
 
-// Like a video
+// Like a video (only once per user, cannot both like and dislike)
 app.post('/api/videos/:id/like', (req, res) => {
-  db.run('UPDATE videos SET likes = likes + 1 WHERE id = ?', [req.params.id], function (err) {
-    if (err) return res.status(500).json({ error: 'Like failed' });
-    res.json({ success: true });
+  if (!req.session.userId) return res.status(401).json({ error: 'Login required' });
+  const userId = req.session.userId;
+  const videoId = req.params.id;
+
+  db.get('SELECT * FROM video_reactions WHERE userId = ? AND videoId = ?', [userId, videoId], (err, reaction) => {
+    if (err) return res.status(500).json({ error: 'DB error' });
+
+    if (reaction && reaction.type === 'like') {
+      // Toggle off like
+      db.serialize(() => {
+        db.run('DELETE FROM video_reactions WHERE userId = ? AND videoId = ?', [userId, videoId]);
+        db.run('UPDATE videos SET likes = likes - 1 WHERE id = ? AND likes > 0', [videoId]);
+      });
+      return res.json({ liked: false, disliked: false });
+    } else if (reaction && reaction.type === 'dislike') {
+      // Switch from dislike to like
+      db.serialize(() => {
+        db.run('UPDATE video_reactions SET type = ? WHERE userId = ? AND videoId = ?', ['like', userId, videoId]);
+        db.run('UPDATE videos SET likes = likes + 1, dislikes = dislikes - 1 WHERE id = ? AND dislikes > 0', [videoId]);
+      });
+      return res.json({ liked: true, disliked: false });
+    } else {
+      // No previous reaction, add like
+      db.serialize(() => {
+        db.run('INSERT OR IGNORE INTO video_reactions (userId, videoId, type) VALUES (?, ?, ?)', [userId, videoId, 'like']);
+        db.run('UPDATE videos SET likes = likes + 1 WHERE id = ?', [videoId]);
+      });
+      return res.json({ liked: true, disliked: false });
+    }
   });
 });
 
-// Dislike a video
+// Dislike a video (only once per user, cannot both like and dislike)
 app.post('/api/videos/:id/dislike', (req, res) => {
-  db.run('UPDATE videos SET dislikes = dislikes + 1 WHERE id = ?', [req.params.id], function (err) {
-    if (err) return res.status(500).json({ error: 'Dislike failed' });
-    res.json({ success: true });
+  if (!req.session.userId) return res.status(401).json({ error: 'Login required' });
+  const userId = req.session.userId;
+  const videoId = req.params.id;
+
+  db.get('SELECT * FROM video_reactions WHERE userId = ? AND videoId = ?', [userId, videoId], (err, reaction) => {
+    if (err) return res.status(500).json({ error: 'DB error' });
+
+    if (reaction && reaction.type === 'dislike') {
+      // Toggle off dislike
+      db.serialize(() => {
+        db.run('DELETE FROM video_reactions WHERE userId = ? AND videoId = ?', [userId, videoId]);
+        db.run('UPDATE videos SET dislikes = dislikes - 1 WHERE id = ? AND dislikes > 0', [videoId]);
+      });
+      return res.json({ liked: false, disliked: false });
+    } else if (reaction && reaction.type === 'like') {
+      // Switch from like to dislike
+      db.serialize(() => {
+        db.run('UPDATE video_reactions SET type = ? WHERE userId = ? AND videoId = ?', ['dislike', userId, videoId]);
+        db.run('UPDATE videos SET dislikes = dislikes + 1, likes = likes - 1 WHERE id = ? AND likes > 0', [videoId]);
+      });
+      return res.json({ liked: false, disliked: true });
+    } else {
+      // No previous reaction, add dislike
+      db.serialize(() => {
+        db.run('INSERT OR IGNORE INTO video_reactions (userId, videoId, type) VALUES (?, ?, ?)', [userId, videoId, 'dislike']);
+        db.run('UPDATE videos SET dislikes = dislikes + 1 WHERE id = ?', [videoId]);
+      });
+      return res.json({ liked: false, disliked: true });
+    }
+  });
+});
+
+// Get user's reaction for a video (for UI)
+app.get('/api/videos/:id/reaction', (req, res) => {
+  if (!req.session.userId) return res.json({ liked: false, disliked: false });
+  db.get('SELECT type FROM video_reactions WHERE userId = ? AND videoId = ?', [req.session.userId, req.params.id], (err, row) => {
+    if (err) return res.status(500).json({ error: 'DB error' });
+    res.json({
+      liked: row && row.type === 'like',
+      disliked: row && row.type === 'dislike'
+    });
   });
 });
 
@@ -235,6 +296,5 @@ app.get('/api/discover', (req, res) => {
   }
 });
 
-// --- Server start ---
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`PeaceOut API running on http://localhost:${PORT}`));
